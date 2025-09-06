@@ -1,6 +1,7 @@
 // src/pages/GameConfigurations.tsx
 import { useSocket } from "../contexts/socketContext";
 import { useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 
 import { Gamepad2, RefreshCw, Settings, Clock } from "lucide-react";
 import { api } from "../utils/api";
@@ -8,7 +9,16 @@ import { Card } from "../components/cards";
 import { Button } from "../components/button";
 
 export const GameConfigurations = () => {
-  const { games } = useSocket()
+  const { games: socketGames } = useSocket()
+  const [games, setGames] = useState(socketGames)
+
+  // Fallback: Load games via REST API if WebSocket doesn't provide them
+  const { data: apiGames, refetch: fetchGames } = useQuery({
+    queryKey: ['games'],
+    queryFn: () => api.get('/api/games').then(res => res.data.games),
+    enabled: Object.keys(socketGames).length === 0, // Only fetch if no socket games
+    refetchInterval: 10000, // Refetch every 10 seconds as fallback
+  })
 
   const { refetch: reloadGames, isLoading: isReloading } = useQuery({
     queryKey: ['reload-games'],
@@ -16,8 +26,18 @@ export const GameConfigurations = () => {
     enabled: false
   })
 
+  // Use socket games if available, otherwise use API games
+  useEffect(() => {
+    if (Object.keys(socketGames).length > 0) {
+      setGames(socketGames)
+    } else if (apiGames && Object.keys(apiGames).length > 0) {
+      setGames(apiGames)
+    }
+  }, [socketGames, apiGames])
+
   const handleReloadGames = () => {
     reloadGames()
+    fetchGames() // Also fetch via API to ensure games are loaded
   }
 
   const getConfigTypeColor = (type: string) => {
