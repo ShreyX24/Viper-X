@@ -1,4 +1,4 @@
-// src/contexts/SocketContext.tsx
+// src/contexts/SocketContext.tsx - Updated for new backend compatibility
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
 import { io, Socket } from 'socket.io-client'
 import toast from 'react-hot-toast'
@@ -10,6 +10,8 @@ interface SUTStatus {
   capabilities: string[]
   last_seen: string | null
   current_task: string | null
+  hostname?: string
+  unique_id?: string
 }
 
 interface GameConfig {
@@ -45,6 +47,19 @@ interface SocketContextType {
   games: Record<string, GameConfig>
   activeRuns: Record<string, AutomationRun>
   runHistory: AutomationRun[]
+  pairedSuts: SUTStatus[]
+  errorNotifications: ErrorNotification[]
+}
+
+interface ErrorNotification {
+  id: string
+  type: 'file_not_found' | 'launch_failed' | 'connection_error' | 'automation_error'
+  title: string
+  message: string
+  run_id?: string
+  game_name?: string
+  sut_ip?: string
+  timestamp: string
 }
 
 const SocketContext = createContext<SocketContextType | null>(null)
@@ -68,6 +83,8 @@ export const SocketProvider = ({ children }: SocketProviderProps) => {
   const [games, setGames] = useState<Record<string, GameConfig>>({})
   const [activeRuns, setActiveRuns] = useState<Record<string, AutomationRun>>({})
   const [runHistory, setRunHistory] = useState<AutomationRun[]>([])
+  const [pairedSuts, setPairedSuts] = useState<SUTStatus[]>([])
+  const [errorNotifications, setErrorNotifications] = useState<ErrorNotification[]>([])
 
   useEffect(() => {
     const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000'
@@ -85,7 +102,6 @@ export const SocketProvider = ({ children }: SocketProviderProps) => {
     newSocket.on('disconnect', () => {
       console.log('Disconnected from backend server')
       setConnected(false)
-      // Only show toast on unexpected disconnection, not on initial load
       if (newSocket.connected === false && newSocket.disconnected === true) {
         toast.error('Disconnected from backend server')
       }
@@ -94,22 +110,76 @@ export const SocketProvider = ({ children }: SocketProviderProps) => {
     newSocket.on('connect_error', (error) => {
       console.error('Connection error:', error)
       setConnected(false)
-      // Don't show popup on connection error, just log it
-      // The breathing status indicator will show the disconnected state
     })
 
-    // Handle SUT updates
+    // ===== NEW BACKEND EVENTS =====
+    
+    // Handle initial device data (new backend format)
+    newSocket.on('initial_devices', (data: { devices: any[], total_count: number, online_count: number }) => {
+      console.log('Received initial devices:', data)
+      const newSuts: Record<string, SUTStatus> = {}
+      
+      data.devices.forEach((device: any) => {
+        const ip = device.ip
+        newSuts[ip] = {
+          ip: device.ip,
+          port: device.port || 8080,
+          status: device.status === 'online' ? 'online' : 'offline',
+          capabilities: device.capabilities || [],
+          last_seen: device.last_seen,
+          current_task: null,
+          hostname: device.hostname,
+          unique_id: device.device_id || device.unique_id
+        }
+      })
+      
+      setSuts(newSuts)
+      console.log('Updated SUTs from initial_devices:', newSuts)
+    })
+
+    // Handle device events (new backend format)
+    newSocket.on('device_event', (data: { event: string, device: any, timestamp: string }) => {
+      console.log('Received device event:', data)
+      
+      if (data.device) {
+        const ip = data.device.ip
+        const deviceUpdate: SUTStatus = {
+          ip: data.device.ip,
+          port: data.device.port || 8080,
+          status: data.device.status === 'online' ? 'online' : 'offline',
+          capabilities: data.device.capabilities || [],
+          last_seen: data.device.last_seen,
+          current_task: null,
+          hostname: data.device.hostname,
+          unique_id: data.device.device_id || data.device.unique_id
+        }
+
+        setSuts(prev => ({
+          ...prev,
+          [ip]: deviceUpdate
+        }))
+        
+        console.log(`Device ${data.event}:`, deviceUpdate)
+      }
+    })
+
+    // ===== LEGACY BACKEND COMPATIBILITY =====
+    
+    // Handle legacy SUT updates (old backend format)
     newSocket.on('suts_update', (data: Record<string, SUTStatus>) => {
+      console.log('Received legacy suts_update:', data)
       setSuts(data)
     })
 
     // Handle game configuration updates
     newSocket.on('games_update', (data: Record<string, GameConfig>) => {
+      console.log('Received games_update:', data)
       setGames(data)
     })
 
     // Handle runs updates
     newSocket.on('runs_update', (data: { active: Record<string, AutomationRun>, history: AutomationRun[] }) => {
+      console.log('Received runs_update:', data)
       setActiveRuns(data.active)
       setRunHistory(data.history)
     })
@@ -120,6 +190,35 @@ export const SocketProvider = ({ children }: SocketProviderProps) => {
         ...prev,
         [data.run_id]: data.run
       }))
+    })
+
+    // Handle error notifications
+    newSocket.on('error_notification', (data: ErrorNotification) => {
+      console.log('Received error notification:', data)
+      const notification = {
+        ...data,
+        id: Date.now().toString() // Simple ID generation
+      }
+      
+      setErrorNotifications(prev => [notification, ...prev.slice(0, 9)]) // Keep last 10 notifications
+      
+      // Show toast notification
+      const errorTypeLabels = {
+        'file_not_found': 'File Not Found',
+        'launch_failed': 'Launch Failed', 
+        'connection_error': 'Connection Error',
+        'automation_error': 'Automation Error'
+      }
+      
+      toast.error(`${errorTypeLabels[data.type] || 'Error'}: ${data.message}`, {
+        duration: 6000
+      })
+    })
+
+    // Handle paired SUTs updates
+    newSocket.on('paired_suts_update', (data: SUTStatus[]) => {
+      console.log('Received paired SUTs update:', data)
+      setPairedSuts(data)
     })
 
     setSocket(newSocket)
@@ -135,7 +234,9 @@ export const SocketProvider = ({ children }: SocketProviderProps) => {
     suts,
     games,
     activeRuns,
-    runHistory
+    runHistory,
+    pairedSuts,
+    errorNotifications
   }
 
   return (
